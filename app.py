@@ -32,6 +32,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.get("/health", tags=["health"])
+def health() -> dict[str, str]:
+    """Comprobación de salud para la plataforma de despliegue."""
+    return {"status": "ok"}
+
+
 app.include_router(auth_router)
 app.include_router(analytics_router)
 
