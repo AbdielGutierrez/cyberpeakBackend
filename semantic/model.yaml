@@ -1,0 +1,446 @@
+# Modelo semántico de Cyberpeak (B3).
+#
+# Fuente de verdad del vocabulario del motor NL → SQL: dominios (FROM con
+# sus joins), métricas, dimensiones, sinónimos, filtros y permisos.
+# Referencia: docs/capa-semantica.md
+
+version: 1
+nombre: Cyberpeak
+descripcion: >-
+  Modelo semántico para analítica conversacional del ERP Cyberpeak:
+  ventas, inventario, gastos y compras.
+
+# Cada dominio es un FROM ya resuelto. Los alias son estables en todos los
+# dominios: v = ventas, dv = detalle_venta, p = productos, s = sucursales,
+# g = gastos, e = entradas, vs = vista_stock.
+dominios:
+  ventas:
+    desde: >-
+      detalle_venta AS dv
+      JOIN ventas AS v ON v.id_venta = dv.id_venta
+      JOIN productos AS p ON p.id_producto = dv.id_producto
+      JOIN sucursales AS s ON s.id_sucursal = v.id_sucursal
+    fecha: v.fecha
+    sucursal: v.id_sucursal
+    usuario: v.id_usuario
+    tabla_fecha: ventas
+    filtra_por_usuario: true
+
+  stock:
+    desde: >-
+      vista_stock AS vs
+      JOIN productos AS p ON p.id_producto = vs.id_producto
+      JOIN sucursales AS s ON s.id_sucursal = vs.id_sucursal
+    fecha: null
+    sucursal: vs.id_sucursal
+    usuario: null
+    tabla_fecha: null
+    filtra_por_usuario: false
+
+  gastos:
+    desde: >-
+      gastos AS g
+      JOIN sucursales AS s ON s.id_sucursal = g.id_sucursal
+    fecha: g.fecha
+    sucursal: g.id_sucursal
+    usuario: null
+    tabla_fecha: gastos
+    filtra_por_usuario: false
+
+  catalogo:
+    desde: >-
+      productos AS p
+      LEFT JOIN (
+        SELECT pr.id_producto, pr.precio_costo, pr.precio_venta
+        FROM precios AS pr
+        WHERE pr.id_precio = (
+          SELECT vigente.id_precio
+          FROM precios AS vigente
+          WHERE vigente.id_producto = pr.id_producto
+          ORDER BY vigente.fecha DESC, vigente.id_precio DESC
+          LIMIT 1
+        )
+      ) AS pr ON pr.id_producto = p.id_producto
+    fecha: null
+    sucursal: null
+    usuario: null
+    tabla_fecha: null
+    filtra_por_usuario: false
+
+  personal:
+    desde: >-
+      usuarios AS u
+    fecha: null
+    sucursal: null
+    usuario: null
+    tabla_fecha: null
+    filtra_por_usuario: false
+
+  entradas:
+    desde: >-
+      entradas AS e
+      JOIN productos AS p ON p.id_producto = e.id_producto
+      JOIN sucursales AS s ON s.id_sucursal = e.id_sucursal
+    fecha: e.fecha
+    sucursal: e.id_sucursal
+    usuario: null
+    tabla_fecha: entradas
+    filtra_por_usuario: false
+
+metricas:
+  ventas_netas:
+    nombre: Ventas netas
+    descripcion: Suma de cantidad por precio de venta.
+    unidad: moneda
+    dominio: ventas
+    expresion: SUM(dv.cantidad * dv.precio_unitario)
+    sensible: false
+    roles: [admin, employee, user]
+    sinonimos:
+      - ventas netas
+      - ventas
+      - total vendido
+      - monto vendido
+      - ingresos
+      - ingreso
+      - facturacion
+      - cuanto se vendio
+
+  unidades_vendidas:
+    nombre: Unidades vendidas
+    descripcion: Cantidad de artículos despachados.
+    unidad: unidades
+    dominio: ventas
+    expresion: SUM(dv.cantidad)
+    sensible: false
+    roles: [admin, employee, user]
+    sinonimos:
+      - unidades vendidas
+      - unidades
+      - cantidad vendida
+      - articulos vendidos
+      - productos vendidos
+      - productos mas vendidos
+      - mas vendidos
+      - lo mas vendido
+      - cuantas unidades
+
+  ticket_promedio:
+    nombre: Ticket promedio
+    descripcion: Venta total dividida entre el número de ventas.
+    unidad: moneda
+    dominio: ventas
+    expresion: ROUND(1.0 * SUM(dv.cantidad * dv.precio_unitario) / COUNT(DISTINCT v.id_venta), 2)
+    sensible: false
+    roles: [admin, employee, user]
+    sinonimos:
+      - ticket promedio
+      - ticket medio
+      - promedio por venta
+      - venta promedio
+
+  precio_promedio:
+    nombre: Precio promedio
+    descripcion: Precio unitario medio de lo vendido.
+    unidad: moneda
+    dominio: ventas
+    expresion: ROUND(AVG(dv.precio_unitario), 2)
+    sensible: false
+    roles: [admin, employee, user]
+    sinonimos:
+      - precio promedio
+      - precio medio
+      - precio de venta promedio
+
+  margen_bruto:
+    nombre: Margen bruto
+    descripcion: Ventas menos el costo de lo vendido.
+    unidad: moneda
+    dominio: ventas
+    expresion: SUM(dv.cantidad * (dv.precio_unitario - dv.costo_unitario))
+    sensible: true
+    roles: [admin]
+    sinonimos:
+      - margen bruto
+      - margen
+      - ganancia
+      - ganancias
+      - rentabilidad
+      - utilidad
+
+  margen_porcentaje:
+    nombre: Margen porcentual
+    descripcion: Margen bruto expresado como porcentaje de las ventas.
+    unidad: porcentaje
+    dominio: ventas
+    expresion: >-
+      ROUND(100.0 * SUM(dv.cantidad * (dv.precio_unitario - dv.costo_unitario))
+      / NULLIF(SUM(dv.cantidad * dv.precio_unitario), 0), 2)
+    sensible: true
+    roles: [admin]
+
+  costo_promedio:
+    nombre: Costo promedio
+    descripcion: Costo unitario medio de lo vendido.
+    unidad: moneda
+    dominio: ventas
+    expresion: ROUND(AVG(dv.costo_unitario), 2)
+    sensible: true
+    roles: [admin]
+
+  stock_actual:
+    nombre: Stock actual
+    descripcion: Existencias disponibles (entradas menos ventas).
+    unidad: unidades
+    dominio: stock
+    expresion: SUM(vs.stock)
+    sensible: false
+    roles: [admin, employee, user]
+    # "Inventario" o "lista de productos" muestran el detalle por producto,
+    # no solo el total de unidades.
+    dimension_por_defecto: producto
+    sinonimos:
+      - stock actual
+      - stock
+      - inventario
+      - existencias
+      - unidades en stock
+      - cuanto stock hay
+      - cuanto queda
+      - cuantos quedan
+      - que queda
+      - unidades disponibles
+      - lista de productos
+      - listado de productos
+
+  productos_bajo_minimo:
+    nombre: Productos bajo mínimo
+    descripcion: Combinaciones producto/sucursal por debajo del stock mínimo.
+    unidad: productos
+    dominio: stock
+    expresion: SUM(vs.bajo_minimo)
+    sensible: false
+    roles: [admin, employee, user]
+
+  productos_en_stock:
+    nombre: Productos con existencias
+    descripcion: >-
+      Productos con existencias en la sucursal (0 si el producto no tiene
+      unidades disponibles).
+    unidad: productos
+    dominio: stock
+    expresion: SUM(CASE WHEN vs.stock > 0 THEN 1 ELSE 0 END)
+    sensible: false
+    roles: [admin, employee, user]
+
+  productos_catalogo:
+    nombre: Productos en catálogo
+    descripcion: Cantidad de productos distintos registrados en el catálogo.
+    unidad: productos
+    dominio: catalogo
+    expresion: COUNT(*)
+    sensible: false
+    roles: [admin, employee, user]
+
+  precio_venta_actual:
+    nombre: Precio de venta
+    descripcion: Precio de venta vigente del producto (último precio registrado).
+    unidad: moneda
+    dominio: catalogo
+    expresion: ROUND(AVG(pr.precio_venta), 2)
+    sensible: false
+    roles: [admin, employee, user]
+    sinonimos:
+      - precio de venta
+      - precios de venta
+      - precio de lista
+      - precio actual
+      - precio vigente
+      - que precio tiene
+      - cuanto cuesta
+      - cuanto vale
+      - precios
+
+  precio_costo_actual:
+    nombre: Precio de costo
+    descripcion: Costo de compra vigente del producto (último costo registrado).
+    unidad: moneda
+    dominio: catalogo
+    expresion: ROUND(AVG(pr.precio_costo), 2)
+    sensible: true
+    roles: [admin]
+
+  trabajadores:
+    nombre: Trabajadores
+    descripcion: Cantidad de trabajadores registrados en el sistema.
+    unidad: personas
+    dominio: personal
+    expresion: COUNT(*)
+    sensible: false
+    roles: [admin, employee]
+    # "Lista de trabajadores" se resuelve como listado de personas.
+    dimension_por_defecto: trabajador
+    sinonimos:
+      - lista de trabajadores
+      - lista de empleados
+      - lista de personal
+      - trabajadores
+      - trabajador
+      - empleados
+      - personal
+      - plantilla
+      - cuantos trabajadores hay
+      - cuantos empleados hay
+
+  gastos_totales:
+    nombre: Gastos totales
+    descripcion: Suma de los gastos operativos.
+    unidad: moneda
+    dominio: gastos
+    expresion: SUM(g.monto)
+    sensible: false
+    roles: [admin, employee]
+    sinonimos:
+      - gastos totales
+      - gastos
+      - egresos
+      - costos operativos
+      - cuanto se gasto
+
+  entradas_unidades:
+    nombre: Unidades ingresadas
+    descripcion: Unidades de inventario ingresadas (compras o reposiciones).
+    unidad: unidades
+    dominio: entradas
+    expresion: SUM(e.cantidad)
+    sensible: false
+    roles: [admin, employee, user]
+    sinonimos:
+      - unidades ingresadas
+      - entradas
+      - compras en unidades
+      - reposiciones
+
+  compras_totales:
+    nombre: Compras totales
+    descripcion: Costo total de las entradas de inventario.
+    unidad: moneda
+    dominio: entradas
+    expresion: SUM(e.cantidad * e.costo_unitario)
+    sensible: true
+    roles: [admin]
+    sinonimos:
+      - compras totales
+      - compras
+      - costo de compras
+      - inversion en inventario
+
+dimensiones:
+  fecha:
+    nombre: Fecha
+    temporal: true
+    sinonimos: [fecha, dia, diario, diaria]
+    expresiones:
+      ventas: v.fecha
+      gastos: g.fecha
+      entradas: e.fecha
+
+  mes:
+    nombre: Mes
+    temporal: true
+    sinonimos: [mes, meses, mensual, mensuales]
+    expresiones:
+      ventas: strftime('%Y-%m', v.fecha)
+      gastos: strftime('%Y-%m', g.fecha)
+      entradas: strftime('%Y-%m', e.fecha)
+
+  anio:
+    nombre: Año
+    temporal: true
+    sinonimos: [anio, anos, anual, anuales, año, años]
+    expresiones:
+      ventas: strftime('%Y', v.fecha)
+      gastos: strftime('%Y', g.fecha)
+      entradas: strftime('%Y', e.fecha)
+
+  sucursal:
+    nombre: Sucursal
+    sinonimos: [sucursal, sucursales, tienda, tiendas, local, locales]
+    expresiones:
+      ventas: s.nombre
+      stock: s.nombre
+      gastos: s.nombre
+      entradas: s.nombre
+
+  producto:
+    nombre: Producto
+    sinonimos: [producto, productos, articulo, articulos, item, items]
+    expresiones:
+      ventas: p.nombre
+      stock: p.nombre
+      catalogo: p.nombre
+      entradas: p.nombre
+
+  categoria:
+    nombre: Categoría
+    sinonimos: [categoria, categorias, rubro, rubros, linea]
+    expresiones:
+      ventas: p.categoria
+      stock: p.categoria
+      catalogo: p.categoria
+      entradas: p.categoria
+      gastos: g.categoria
+
+  marca:
+    nombre: Marca
+    sinonimos: [marca, marcas]
+    expresiones:
+      ventas: p.marca
+      stock: p.marca
+      catalogo: p.marca
+      entradas: p.marca
+
+  vendedor:
+    nombre: Vendedor
+    sinonimos:
+      [vendedor, vendedores, vendedora, vendedoras, empleado, empleados]
+    expresiones:
+      ventas: v.vendedor
+
+  trabajador:
+    nombre: Trabajador
+    sinonimos: [trabajador, trabajadores, trabajadora, trabajadoras]
+    expresiones:
+      ventas: v.vendedor
+      personal: u.nombre || ' ' || u.apellido
+
+  rol:
+    nombre: Rol
+    sinonimos: [rol, roles, puesto, puestos, cargo, cargos]
+    expresiones:
+      personal: u.rol
+
+  proveedor:
+    nombre: Proveedor
+    sinonimos: [proveedor, proveedores]
+    expresiones:
+      entradas: e.proveedor
+
+meses:
+  enero: 1
+  febrero: 2
+  marzo: 3
+  abril: 4
+  mayo: 5
+  junio: 6
+  julio: 7
+  agosto: 8
+  septiembre: 9
+  setiembre: 9
+  octubre: 10
+  noviembre: 11
+  diciembre: 12
+
+opciones:
+  limite_por_defecto: 10
+  limite_temporal: 24
