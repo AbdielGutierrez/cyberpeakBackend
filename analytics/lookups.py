@@ -227,3 +227,41 @@ def find_entity(kind: str, text: str) -> str | None:
     if kind == "employee":
         return _find_employee(norm)
     return None
+
+
+def find_employees(text: str) -> list[str]:
+    """Todos los empleados mencionados en el texto (no solo uno)."""
+    norm = normalize(text)
+    found: list[str] = []
+    for name in employee_names():
+        for token in normalize(name).split():
+            if len(token) < 4:
+                continue
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", norm
+            ):
+                if name not in found:
+                    found.append(name)
+                break
+    return found
+
+
+def find_products(text: str) -> list[str]:
+    """Todos los productos cuyo nombre aparece completo en el texto."""
+    norm = normalize(text)
+    found: list[str] = []
+    for value in distinct_values(*SOURCES["product"]):
+        tokens = [
+            word
+            for word in normalize(value).split()
+            if len(word) >= 3 and word not in STOPWORDS
+        ]
+        if not tokens:
+            continue
+        if all(
+            re.search(rf"(?<![a-z0-9]){re.escape(tok)}(?![a-z0-9])", norm)
+            for tok in tokens
+        ):
+            if value not in found:
+                found.append(value)
+    return found

@@ -1011,7 +1011,6 @@ INTENTS: tuple[Intent, ...] = (
             "       Country AS pais,\n"
             "       City AS ciudad\n"
             "FROM Suppliers\n"
-            "ORDER BY SupplierName"
         ),
         columns=("proveedor", "pais", "ciudad"),
         description="Listado de proveedores con su país y ciudad.",

@@ -111,12 +111,13 @@ def foreign_employee(question: str, scope: Scope) -> str | None:
     """Nombre de otro empleado mencionado en la pregunta, si lo hay."""
     if scope.is_admin:
         return None
-    mentioned = lookups.find_entity("employee", question)
-    if mentioned is None:
+    mentioned = lookups.find_employees(question)
+    if not mentioned:
         return None
-    if scope.employee_name is not None and mentioned == scope.employee_name:
-        return None
-    return mentioned
+    for name in mentioned:
+        if scope.employee_name is None or name != scope.employee_name:
+            return name
+    return None
 
 
 def _ctes(employee_id: int) -> str:

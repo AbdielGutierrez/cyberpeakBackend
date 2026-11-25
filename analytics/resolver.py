@@ -269,6 +269,358 @@ def _bind(intent: catalog.Intent, text: str) -> Plan | None:
     )
 
 
+# ------------------------------------------------------------------ operaciones matemáticas
+
+MATH_OPS = (
+    ("sum", ("suma", "sumar", "sumatoria")),
+    ("avg", ("promedio", "media", "promediar")),
+    ("sub", ("resta", "restar", "diferencia")),
+    ("mul", ("multiplicacion", "multiplicar")),
+    ("div", ("division", "dividir", "cociente", "ratio")),
+)
+
+
+def _math_op(text: str) -> str | None:
+    for op, words in MATH_OPS:
+        if any(word in text for word in words):
+            return op
+    return None
+
+
+def _scalar_expr(metric: str, where_clause: str, params: list) -> tuple[str, tuple]:
+    """Subconsulta escalar que devuelve el agregado de ``metric`` con el filtro dado."""
+    expression, _label = METRICS[metric]
+    where = (" WHERE " + where_clause) if where_clause else ""
+    sql = f"(SELECT COALESCE({expression}, 0) {GENERIC_JOINS}{where})"
+    return sql, tuple(params)
+
+
+def _match_math(text: str) -> Plan | None:
+    op = _math_op(text)
+    if op is None:
+        return None
+
+    employees = lookups.find_employees(text)
+    products = lookups.find_products(text)
+
+    metric = next(
+        (name for name, words in METRIC_KEYWORDS if any(w in text for w in words)),
+        None,
+    )
+    if metric is None and ("total" in text or "totales" in text):
+        metric = "ventas"
+
+    # No secuestrar preguntas normales (p. ej. "ticket promedio") cuando no hay
+    # métrica de ventas/unidades ni entidades ni totales.
+    if (
+        metric not in ("ventas", "unidades")
+        and not employees
+        and not products
+        and "total" not in text
+        and "totales" not in text
+    ):
+        # Aritmética pura entre dos números, si la hay.
+        if op in ("sum", "sub", "mul", "div"):
+            nums = [n for _, n in _numbers(text) if not (1900 <= n <= 2100)]
+            if len(nums) >= 2:
+                a, b = nums[0], nums[1]
+                if op == "sum":
+                    value = a + b
+                elif op == "sub":
+                    value = a - b
+                elif op == "mul":
+                    value = a * b
+                else:
+                    value = a / b if b else 0
+                return Plan(
+                    intent_id="matematica_pura",
+                    category="Cálculo",
+                    response_type=SCALAR_NUMBER,
+                    sql=f"SELECT {value} AS resultado",
+                    params=(),
+                    columns=("resultado",),
+                    description=f"Resultado de la operación: {value}.",
+                )
+        return None
+
+    if metric is None:
+        metric = "ventas"
+
+    numbers = [n for _, n in _numbers(text) if not (1900 <= n <= 2100)]
+    # descartar números que son claramente años o IDs grandes
+    small_numbers = [n for n in numbers if 1 <= n <= 1000]
+
+    _expr, label = METRICS[metric]
+
+    # ----- suma
+    if op == "sum":
+        where_clauses: list[str] = []
+        params: list = []
+        if employees:
+            placeholders = ", ".join("?" for _ in employees)
+            where_clauses.append(
+                f"e.FirstName || ' ' || e.LastName IN ({placeholders})"
+            )
+            params.extend(employees)
+        if products:
+            placeholders = ", ".join("?" for _ in products)
+            where_clauses.append(f"p.ProductName IN ({placeholders})")
+            params.extend(products)
+        where = " AND ".join(where_clauses)
+        where_sql = (" WHERE " + where) if where else ""
+        sql = f"SELECT {METRICS[metric][0]} AS \"{label}\"\n{GENERIC_JOINS}{where_sql}"
+        names = employees + products
+        desc = f"Suma de {label.lower()}"
+        if names:
+            desc += " de " + ", ".join(names)
+        if not names:
+            desc += " totales"
+        return Plan(
+            intent_id="matematica_suma",
+            category="Ventas generales",
+            response_type=SCALAR_NUMBER,
+            sql=sql,
+            params=tuple(params),
+            columns=(label,),
+            description=desc + ".",
+        )
+
+    # ----- promedio
+    if op == "avg":
+        if metric == "pedidos":
+            order_value = "1"
+        elif metric == "unidades":
+            order_value = "SUM(od.Quantity)"
+        else:
+            order_value = "SUM(od.Quantity * p.Price)"
+        where_clauses = []
+        params = []
+        if employees:
+            placeholders = ", ".join("?" for _ in employees)
+            where_clauses.append(
+                f"e.FirstName || ' ' || e.LastName IN ({placeholders})"
+            )
+            params.extend(employees)
+        if products:
+            placeholders = ", ".join("?" for _ in products)
+            where_clauses.append(f"p.ProductName IN ({placeholders})")
+            params.extend(products)
+        where = " AND ".join(where_clauses)
+        where_sql = (" WHERE " + where) if where else ""
+        sql = (
+            f"SELECT ROUND(AVG(order_total), 2) AS promedio_ventas\n"
+            f"FROM (\n"
+            f"  SELECT o.OrderID, {order_value} AS order_total\n"
+            f"  {GENERIC_JOINS}\n"
+            f"  {where_sql}\n"
+            f"  GROUP BY o.OrderID\n"
+            f")"
+        )
+        names = employees + products
+        desc = "Promedio de " + label.lower()
+        if names:
+            desc += " de " + ", ".join(names)
+        else:
+            desc += " totales"
+        return Plan(
+            intent_id="matematica_promedio",
+            category="Ventas generales",
+            response_type=SCALAR_NUMBER,
+            sql=sql,
+            params=tuple(params),
+            columns=("promedio_ventas",),
+            description=desc + ".",
+        )
+
+    # ----- resta / multiplicación / división
+    if op in ("sub", "mul", "div"):
+        # Dos entidades del mismo tipo → operación entre sus totales.
+        if len(employees) >= 2:
+            left_clause = "e.FirstName || ' ' || e.LastName = ?"
+            right_clause = "e.FirstName || ' ' || e.LastName = ?"
+            left_sql, left_params = _scalar_expr(metric, left_clause, [employees[0]])
+            right_sql, right_params = _scalar_expr(metric, right_clause, [employees[1]])
+            operands = (employees[0], employees[1])
+        elif len(products) >= 2:
+            left_sql, left_params = _scalar_expr(metric, "p.ProductName = ?", [products[0]])
+            right_sql, right_params = _scalar_expr(metric, "p.ProductName = ?", [products[1]])
+            operands = (products[0], products[1])
+        elif (employees or products) and small_numbers:
+            entity = (employees or products)[0]
+            is_emp = bool(employees)
+            clause = (
+                "e.FirstName || ' ' || e.LastName = ?"
+                if is_emp
+                else "p.ProductName = ?"
+            )
+            left_sql, left_params = _scalar_expr(metric, clause, [entity])
+            right_sql, right_params = None, ()
+            number = small_numbers[0]
+            operands = (entity, number)
+        elif len(small_numbers) >= 2:
+            left_sql, left_params = None, ()
+            right_sql, right_params = None, ()
+            operands = (small_numbers[0], small_numbers[1])
+        else:
+            return None
+
+        if left_sql is not None and right_sql is not None:
+            if op == "sub":
+                expr = f"ROUND({left_sql} - {right_sql}, 2)"
+            elif op == "mul":
+                expr = f"ROUND({left_sql} * {right_sql}, 2)"
+            else:
+                expr = f"ROUND({left_sql} * 1.0 / NULLIF({right_sql}, 0), 2)"
+            params = left_params + right_params
+            nombres_op = {"sub": "Diferencia", "mul": "Producto", "div": "Cociente"}
+            desc = f"{nombres_op[op]} entre {operands[0]} y {operands[1]}"
+        elif left_sql is not None:
+            number = operands[1]
+            if op == "sub":
+                expr = f"ROUND({left_sql} - ?, 2)"
+            elif op == "mul":
+                expr = f"ROUND({left_sql} * ?, 2)"
+            else:
+                expr = f"ROUND({left_sql} / NULLIF(?, 0), 2)"
+            params = left_params + (number,)
+            nombres_op = {"sub": "Diferencia", "mul": "Producto", "div": "Cociente"}
+            desc = f"{nombres_op[op]} de {operands[0]} y {number}"
+        else:
+            a, b = operands
+            if op == "sub":
+                value = a - b
+            elif op == "mul":
+                value = a * b
+            else:
+                value = a / b if b else 0
+            return Plan(
+                intent_id="matematica_pura",
+                category="Cálculo",
+                response_type=SCALAR_NUMBER,
+                sql=f"SELECT {value} AS resultado",
+                params=(),
+                columns=("resultado",),
+                description=f"Resultado de la operación: {value}.",
+            )
+
+        label_out = "resultado"
+        return Plan(
+            intent_id=f"matematica_{op}",
+            category="Ventas generales",
+            response_type=SCALAR_NUMBER,
+            sql=f"SELECT {expr} AS {label_out}",
+            params=tuple(params),
+            columns=(label_out,),
+            description=desc + ".",
+        )
+
+    return None
+
+
+# ------------------------------------------------------------------ listas de empleados
+
+
+def _match_employee_list(text: str) -> Plan | None:
+    if "emplead" not in text:
+        return None
+    list_words = (
+        "lista", "listado", "dame", "muestra", "todos", "todas",
+        "quienes", "catalogo", "catalogo",
+    )
+    names = lookups.find_employees(text)
+    if not (any(word in text for word in list_words) or names):
+        return None
+    blockers = (
+        "vend", "venta", "factur", "ingres", "orden", "pedido", "cuant",
+        "nac", "mas", "menos", "monto", "gestion", "rol", "top",
+    )
+    if any(word in text for word in blockers):
+        return None
+
+    numbers = _numbers(text)
+    limit = None
+    for _, n in numbers:
+        if n.is_integer() and 1 <= n <= 1000 and not (1900 <= n <= 2100):
+            limit = int(n)
+            break
+
+    params: list = []
+    where = ""
+    if names:
+        placeholders = ", ".join("?" for _ in names)
+        where = f"WHERE e.FirstName || ' ' || e.LastName IN ({placeholders})"
+        params.extend(names)
+
+    lines = [
+        "SELECT e.FirstName || ' ' || e.LastName AS empleado,",
+        "       e.BirthDate AS nacimiento",
+        "FROM Employees e",
+    ]
+    if where:
+        lines.append(where)
+    lines.append("ORDER BY empleado")
+    if limit is not None:
+        lines.append(f"LIMIT {limit}")
+
+    desc = "Listado de empleados"
+    if names:
+        desc += " (" + ", ".join(names) + ")"
+    if limit is not None:
+        desc += f", máximo {limit}"
+    return Plan(
+        intent_id="empleados_lista_filtrada",
+        category="Empleados",
+        response_type=ROW_LIST,
+        sql="\n".join(lines),
+        params=tuple(params),
+        columns=("empleado", "nacimiento"),
+        description=desc + ".",
+    )
+
+
+# ------------------------------------------------------------------ listas de proveedores
+
+
+def _match_supplier_list(text: str) -> Plan | None:
+    if "proveedor" not in text:
+        return None
+    blockers = (
+        "cuant", "total", "mas", "menos", "producto", "ingreso", "factur",
+        "vend", "rol",
+    )
+    if any(word in text for word in blockers):
+        return None
+
+    country = lookups.find_entity("country", text)
+    params: list = []
+    where = ""
+    if country is not None:
+        where = "WHERE Country = ?"
+        params.append(country)
+
+    lines = [
+        "SELECT SupplierName AS proveedor,",
+        "       Country AS pais,",
+        "       City AS ciudad",
+        "FROM Suppliers",
+    ]
+    if where:
+        lines.append(where)
+
+    desc = "Listado de proveedores con su país y ciudad."
+    if country is not None:
+        desc += f" ({country})"
+    return Plan(
+        intent_id="proveedores_lista_filtrada",
+        category="Proveedores",
+        response_type=ROW_LIST,
+        sql="\n".join(lines),
+        params=tuple(params),
+        columns=("proveedor", "pais", "ciudad"),
+        description=desc,
+    )
+
+
 # ------------------------------------------------------------------ resolver
 
 
@@ -281,6 +633,18 @@ def resolve(question: str, role: str = "admin") -> Plan | None:
     text = normalize(question)
     if not text:
         return None
+
+    plan = _match_math(text)
+    if plan is not None:
+        return plan
+
+    plan = _match_employee_list(text)
+    if plan is not None:
+        return plan
+
+    plan = _match_supplier_list(text)
+    if plan is not None:
+        return plan
 
     plan = _match_catalog(text)
     if plan is not None:
