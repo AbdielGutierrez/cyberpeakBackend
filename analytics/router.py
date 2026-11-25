@@ -33,27 +33,26 @@ class AskRequest(BaseModel):
 def metrics(user: sqlite3.Row = Depends(require_roles(*ANALYTICS_ROLES))) -> dict:
     """Conteos principales de Northwind para las tarjetas del panel."""
     scope = scoping.build_scope(user)
-    scoped = "" if scope.is_admin else scope.own_id
     counts = {
         "orders": (
             "SELECT COUNT(*) FROM Orders",
             "SELECT COUNT(*) FROM Orders WHERE EmployeeID = ?",
-            (scoped,),
         ),
-        "customers": ("SELECT COUNT(*) FROM Customers", None, ()),
-        "products": ("SELECT COUNT(*) FROM Products", None, ()),
+        "customers": ("SELECT COUNT(*) FROM Customers", None),
+        "products": ("SELECT COUNT(*) FROM Products", None),
         "employees": (
             "SELECT COUNT(*) FROM Employees",
             "SELECT COUNT(*) FROM Employees WHERE EmployeeID = ?",
-            (scoped,),
         ),
     }
 
     with connection() as conn:
         result = {}
-        for name, (everyone, own, params) in counts.items():
-            sql = everyone if scope.is_admin or own is None else own
-            result[name] = conn.execute(sql, params).fetchone()[0]
+        for name, (everyone, own) in counts.items():
+            if scope.is_admin or own is None:
+                result[name] = conn.execute(everyone).fetchone()[0]
+            else:
+                result[name] = conn.execute(own, (scope.own_id,)).fetchone()[0]
         return result
 
 
